@@ -18,6 +18,7 @@ Given:
   - time_window_duration: minutes per index bucket (default 30)
   - vehicle_capacity: int (default 4)
   - max_vehicles: hard cap (default vehicle_num + 10 if not specified)
+  - max_solve_time: maximum time in seconds for OR-Tools solver (default 10)
 
 Behavior
 --------
@@ -62,6 +63,7 @@ def cost_estimator(
     time_window_duration: int = 30,
     vehicle_capacity: int = 4,
     max_vehicles: int = None,
+    max_solve_time: int = 10,
 ) -> Dict:
     """
     Estimate the total routing cost for a mandatory-serve DARP using OR-Tools.
@@ -84,6 +86,7 @@ def cost_estimator(
             vehicle_travel_speed=vehicle_travel_speed,
             time_window_duration=time_window_duration,
             vehicle_capacity=vehicle_capacity,
+            max_solve_time=max_solve_time,
         )
 
         # Compose cost model for this attempt
@@ -107,7 +110,7 @@ def cost_estimator(
             break
 
     if best is None:
-        # Return the last infeasible attempt’s metadata
+        # Return the last infeasible attempt's metadata
         best = {
             "status": "INFEASIBLE",
             "routing_cost": 0.0,
@@ -134,6 +137,7 @@ def _solve_darp_mandatory(
     vehicle_travel_speed: float,
     time_window_duration: int,
     vehicle_capacity: int,
+    max_solve_time: int,
 ) -> Dict:
     """Solve a DARP with mandatory pickup-and-delivery (no dropping)."""
 
@@ -247,7 +251,7 @@ def _solve_darp_mandatory(
     search = pywrapcp.DefaultRoutingSearchParameters()
     search.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION
     search.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search.time_limit.seconds = 10
+    search.time_limit.seconds = max_solve_time
     search.log_search = False
 
     solution = routing.SolveWithParameters(search)
@@ -346,5 +350,6 @@ if __name__ == "__main__":
         time_window_duration=30,
         vehicle_capacity=2,
         max_vehicles=3,
+        max_solve_time=10,
     )
     pprint.pprint(res)
