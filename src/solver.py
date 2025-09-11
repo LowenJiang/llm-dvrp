@@ -334,7 +334,7 @@ if __name__ == "__main__":
     import pprint
 
     # Tiny synthetic example (3 requests, 1 depot + 6 nodes -> 7x7)
-    requests = sim.simulation(N=5)
+    requests, index_list = sim.simulation(N=5)
     enc_net = nodify.create_network(requests)
     dm = enc_net['distance']
 

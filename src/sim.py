@@ -12,7 +12,7 @@ Origin and destination are in h3 indices.
 time window are indices of 30min intervals
 """
 
-def simulation(N=20, resolution=9, temporal_interval_minutes=30, vehicle_speed_kmh=20, min_distance_h3_units=3):
+def simulation(N=20, resolution=7, temporal_interval_minutes=30, vehicle_speed_kmh=20, min_distance_h3_units=3):
     """
     Generate N ride requests in San Francisco City Region for DARP simulation.
     
@@ -38,12 +38,14 @@ def simulation(N=20, resolution=9, temporal_interval_minutes=30, vehicle_speed_k
     
     Returns:
     --------
-    pd.DataFrame
-        DataFrame with columns: origin, destination, o_t_index, d_t_index
-        - origin: Origin (pickup) H3 index
-        - destination: Destination (dropoff) H3 index  
-        - o_t_index: Origin time window index (1-48 for 30min intervals)
-        - d_t_index: Destination time window index (1-48 for 30min intervals)
+    tuple
+        (pd.DataFrame, list)
+        - DataFrame with columns: origin, destination, o_t_index, d_t_index
+          - origin: Origin (pickup) H3 index
+          - destination: Destination (dropoff) H3 index  
+          - o_t_index: Origin time window index (1-48 for 30min intervals)
+          - d_t_index: Destination time window index (1-48 for 30min intervals)
+        - List of H3 indices covering the San Francisco region
     """
     
     # San Francisco inner city boundaries (lat, lon) - more restrictive to stay within city limits
@@ -133,10 +135,11 @@ def simulation(N=20, resolution=9, temporal_interval_minutes=30, vehicle_speed_k
         if attempts >= max_attempts:
             print(f"Warning: Could not generate valid request after {max_attempts} attempts")
     
-    return pd.DataFrame(requests)
+    return pd.DataFrame(requests), sf_h3_indices
 
 
 if __name__ == "__main__":
-    requests = simulation()
+    requests, sf_h3_indices = simulation()
     print(requests)
-
+    print(f"\nH3 indices covering SF region ({len(sf_h3_indices)} total):")
+    print(sf_h3_indices)
