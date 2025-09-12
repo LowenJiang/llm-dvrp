@@ -18,7 +18,7 @@ Given:
   - time_window_duration: minutes per index bucket (default 30)
   - vehicle_capacity: int (default 4)
   - max_vehicles: hard cap (default vehicle_num + 10 if not specified)
-  - max_solve_time: maximum time in seconds for OR-Tools solver (default 10)
+  - max_solve_time: maximum wall-clock time in seconds for OR-Tools solver (float supported)
 
 Behavior
 --------
@@ -63,7 +63,7 @@ def cost_estimator(
     time_window_duration: int = 30,
     vehicle_capacity: int = 4,
     max_vehicles: int = None,
-    max_solve_time: int = 10,
+    max_solve_time: float = 10.0,
 ) -> Dict:
     """
     Estimate the total routing cost for a mandatory-serve DARP using OR-Tools.
@@ -137,7 +137,7 @@ def _solve_darp_mandatory(
     vehicle_travel_speed: float,
     time_window_duration: int,
     vehicle_capacity: int,
-    max_solve_time: int,
+    max_solve_time: float,
 ) -> Dict:
     """Solve a DARP with mandatory pickup-and-delivery (no dropping)."""
 
@@ -251,7 +251,17 @@ def _solve_darp_mandatory(
     search = pywrapcp.DefaultRoutingSearchParameters()
     search.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION
     search.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search.time_limit.seconds = max_solve_time
+    # Support fractional seconds for time limit
+    _max_time = max(0.0, float(max_solve_time))
+    _whole = int(_max_time)
+    _nanos = int(round((_max_time - _whole) * 1e9))
+    search.time_limit.seconds = _whole
+    # OR-Tools Duration supports nanos attribute
+    try:
+        search.time_limit.nanos = _nanos
+    except Exception:
+        # Fallback for older OR-Tools builds without nanos field
+        pass
     search.log_search = False
 
     solution = routing.SolveWithParameters(search)
@@ -301,31 +311,47 @@ def _create_nodes(requests):
     request_to_pickup = {}
     request_to_dropoff = {}
 
-    node_id = 1  # 0 is depot
-    for i, _ in enumerate(requests):
-        p = node_id
-        d = node_id + 1
-        pickup_nodes.append(p)
-        dropoff_nodes.append(d)
-        node_to_request[p] = (i, "pickup")
-        node_to_request[d] = (i, "dropoff")
-        request_to_pickup[i] = p
-        request_to_dropoff[i] = d
-        node_id += 2
+    # Depot is node 0; we will index pickups 1..N and dropoffs N+1..2N
+    depot = 0
+    next_node = 1
+
+    for i, req in enumerate(requests):
+        p_node = next_node
+        d_node = next_node + 1
+        next_node += 2
+        pickup_nodes.append(p_node)
+        dropoff_nodes.append(d_node)
+        node_to_request[p_node] = i
+        node_to_request[d_node] = i
+        request_to_pickup[i] = p_node
+        request_to_dropoff[i] = d_node
 
     return pickup_nodes, dropoff_nodes, node_to_request, request_to_pickup, request_to_dropoff
 
 
 def _get_node_location(node, depot_node, pickup_nodes, dropoff_nodes, node_to_request, requests):
-    """Map internal node id -> location index in distance_matrix."""
+    """Map a solver node id back to a location index in the distance matrix.
+
+    Returns the index into the distance matrix corresponding to the given node.
+    """
+    # Depot maps to depot_node
     if node == 0:
         return depot_node
+
+    # Pickup nodes map to the origin location of the corresponding request
     if node in pickup_nodes:
-        req_idx, _ = node_to_request[node]
+        req_idx = node_to_request.get(node)
+        if req_idx is None:
+            return None
         return requests[req_idx]["origin"]
+
+    # Dropoff nodes map to the destination location of the corresponding request
     if node in dropoff_nodes:
-        req_idx, _ = node_to_request[node]
+        req_idx = node_to_request.get(node)
+        if req_idx is None:
+            return None
         return requests[req_idx]["destination"]
+
     return None
 
 
@@ -352,4 +378,6 @@ if __name__ == "__main__":
         max_vehicles=3,
         max_solve_time=10,
     )
+    print(requests)
+    print(enc_net['map'])
     pprint.pprint(res)
