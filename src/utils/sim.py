@@ -12,7 +12,7 @@ Origin and destination are in h3 indices.
 time window are indices of 30min intervals
 """
 
-def simulation(N=20, resolution=7, temporal_interval_minutes=30, vehicle_speed_kmh=20, min_distance_h3_units=3):
+def simulation(N=20, resolution=7, temporal_interval_minutes=30, vehicle_speed_kmh=20, min_distance_h3_units=3, random_seed=None):
     """
     Generate N ride requests in San Francisco City Region for DARP simulation.
     
@@ -47,7 +47,10 @@ def simulation(N=20, resolution=7, temporal_interval_minutes=30, vehicle_speed_k
           - d_t_index: Destination time window index (1-48 for 30min intervals)
         - List of H3 indices covering the San Francisco region
     """
-    
+    if random_seed is not None:
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+
     # San Francisco inner city boundaries (lat, lon) - more restrictive to stay within city limits
     sf_center_lat, sf_center_lon = 37.7749, -122.4194
     sf_bounds = {

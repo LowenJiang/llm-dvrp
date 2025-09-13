@@ -1,5 +1,5 @@
-import sim
-import nodify
+from . import sim
+from . import nodify
 """
 Cost Estimator for DARP using OR-Tools.
 
