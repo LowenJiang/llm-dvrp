@@ -1,0 +1,10 @@
+------Problem Setup------
+N = 10 requests to process
+j = 5  fixed requests at the beginning of the episode
+randomseed = 42 (fixed requests information)
+user_beta = 0.5 (coin-flip acceptance upon negotiation)
+penalty = 0.5 * (||delta||1) penalty incurred if a user accepts 
+action space = 8*8 (set max negotiation window as an arbitrary 4 hours), 
+    | valid action mask not applied. Infeasibility penalty = 1000
+
+

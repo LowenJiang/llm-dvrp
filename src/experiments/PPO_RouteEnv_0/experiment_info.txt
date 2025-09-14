@@ -1,0 +1,12 @@
+Very slow. Around 8 it/second
+
+Parameters: 
+max_solve_time = 0.1s
+action masking = False (+- 6 timewindow)
+N = 20 (total requests, requests randomly generated)
+j = 5 (minimum requests to start action)
+n_steps=256,        # Reduced from 2048 for more frequent updates
+batch_size=64
+eval_freq=2048
+
+steps = 10000
