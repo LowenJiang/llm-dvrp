@@ -1,11 +1,12 @@
+# env_route.py
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from copy import deepcopy
 
 # Your local modules
-from utils import sim, nodify
-from utils import solver, user
+from . import sim, nodify 
+from .import solver, user
 
 class RouteEnv(gym.Env):
     """
@@ -20,22 +21,18 @@ class RouteEnv(gym.Env):
     def __init__(self, 
                  N=20, 
                  j=5,                   # number of requests to fix at the beginning
-                 lambda_penalty=0.5,
+                 lambda_penalty=0.1,
                  max_delta=6,           # max absolute perturbation for time windows (in 30-min ticks)
                  route_kwargs=None,
                  seed: int | None = None,
-                 user_function=None,
-                 max_solve_time=0.1):
+                 user_function=None):
         super().__init__()
         self.N = N
         self.j = j
         self.lambda_penalty = float(lambda_penalty)
         self.max_delta = int(max_delta)
-        self.max_solve_time = max_solve_time
-        
-        # Store seed for request generation (deterministic)
-        self.request_seed = seed
-        
+        self._rng = np.random.default_rng(seed)
+
         # User acceptance function (defaults to user.dummy_user)
         self.user_function = user_function if user_function is not None else user.dummy_user
 
@@ -48,18 +45,10 @@ class RouteEnv(gym.Env):
         self.depot_node = int(route_kwargs.get('depot_node', 0))
         self.time_window_duration = int(route_kwargs.get('time_window_duration', 30))
         self.vehicle_capacity = int(route_kwargs.get('vehicle_capacity', 4))
+        self.max_solve_time = float(route_kwargs.get('max_solve_time', 5.0))
 
-        # Seed global random/numpy for deterministic request generation
-        if seed is not None:
-            import random
-            random.seed(seed)
-            np.random.seed(seed)
-
-        # Build data formerly produced by Route (now deterministic)
+        # Build data formerly produced by Route
         self.requests_df, self.loc_indices = sim.simulation(N=self.N, vehicle_speed_kmh=self.vehicle_speed)
-        
-        # Create separate RNG for user responses (will be random but not used for requests)
-        self._user_rng = np.random.default_rng(None)  # Always random, not seeded
         self.enc_net = nodify.create_network(self.requests_df)
         self.dm = self.enc_net['distance']
         self.reqs = self.enc_net['requests']
@@ -94,8 +83,8 @@ class RouteEnv(gym.Env):
     # ---------- Core Gym API ----------
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
-        # Note: We don't re-seed for requests since they should stay fixed
-        # User responses will remain random via self._user_rng
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
 
         # Reset collections
         self.fixed_reqs = []
@@ -140,21 +129,9 @@ class RouteEnv(gym.Env):
 
         # Compute reward: (cost_prev - cost_new) - patience_penalty_if_accepted
         i = len(self.fixed_reqs)
-
-        penalty = self.lambda_penalty * (abs(delta_o) + abs(delta_d)) if accepted else 0.0
-
         cost_new = self._solve_cost_for_first_i(i)
-
-        # If cost_new is infeasible (inf), set reward to -1000
-        if cost_new == float('inf'):
-            reward = -1000.0
-            obs = self._build_terminal_observation()
-            info = {"i": i, "accepted": accepted, "penalty": penalty, "marginal_gain": float('inf'),
-                    "cost_prev": float(self.cost_prev), "infeasible": True}
-            return obs, reward, True, False, info
-        
         marginal_gain = (self.cost_prev - cost_new)  # positive if cost decreased
-
+        penalty = self.lambda_penalty * (abs(delta_o) + abs(delta_d)) if accepted else 0.0
         reward = float(marginal_gain - penalty)
 
         # Update cache and pointer
@@ -196,20 +173,16 @@ class RouteEnv(gym.Env):
 
     def _call_user(self, next_req_orig, req_pert, delta_o, delta_d):
         """
-        Call user function to get acceptance decision.
-        If a custom user_function is provided, use it; otherwise fall back to random acceptance.
+        Call the configured user_function with flexible signatures.
+        Tries (orig, pert, delta_o, delta_d) -> bool, then () -> bool, then (pert) -> bool.
         """
-        # If a custom user_function was passed in, use it (supports richer logic)
         try:
-            if self.user_function is not None and self.user_function is not user.dummy_user:
-                return bool(self.user_function(next_req_orig, req_pert, delta_o, delta_d))
-        except Exception:
-            # If the custom function errors, fall back to random behavior
-            pass
-
-        # Default random user
-        acceptance_rate = 0.5  # 50% acceptance
-        return bool(self._user_rng.random() <= acceptance_rate)
+            return self.user_function(next_req_orig, req_pert, delta_o, delta_d)
+        except TypeError:
+            try:
+                return self.user_function()
+            except TypeError:
+                return self.user_function(req_pert)
 
     def _perturb_request(self, req, delta_o, delta_d):
         """
@@ -218,9 +191,9 @@ class RouteEnv(gym.Env):
         new_req = deepcopy(req)
         new_req['o_t_index'] = int(np.clip(new_req['o_t_index'] + delta_o, 1, self.H))
         new_req['d_t_index'] = int(np.clip(new_req['d_t_index'] + delta_d, 1, self.H))
-        # Enforce pickup time not after dropoff time
-        if new_req['d_t_index'] < new_req['o_t_index']:
-            new_req['d_t_index'] = new_req['o_t_index']
+        # enforce pickup before dropoff
+        if new_req['o_t_index'] >= new_req['d_t_index']:
+            new_req['d_t_index'] = min(self.H, new_req['o_t_index'] + 1)
         return new_req
 
     def _aggregate_from_requests(self, reqs_subset):
@@ -299,27 +272,16 @@ class RouteEnv(gym.Env):
     # ---------- Optional: seeding for reproducibility ----------
 
     def seed(self, seed=None):
-        # Seed global random/numpy for request generation consistency
-        if seed is not None:
-            import random
-            random.seed(seed)
-            np.random.seed(seed)
-        # Keep user responses random (don't seed self._user_rng)
+        self._rng = np.random.default_rng(seed)
         return [seed]
 
 if __name__ == "__main__":
     env = RouteEnv(user_function=user.dummy_user)
     obs, info = env.reset()
     #print(obs)
+    #print(info)
     action = env.action_space.sample()
     print(action)
     observation, reward, terminated, truncated, info = env.step(action)
     #print(observation)
     print(reward)
-    print(info)
-
-    action = env.action_space.sample()
-    print(action)
-    observation, reward, terminated, truncated, info = env.step(action)
-    print(reward)
-    print(info)
