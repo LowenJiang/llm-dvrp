@@ -25,7 +25,8 @@ class RouteEnv(gym.Env):
                  route_kwargs=None,
                  seed: int | None = None,
                  user_function=None,
-                 max_solve_time=0.1):
+                 max_solve_time=0.1,
+                 mask_action=False): # if True, only valid actions are allowed. Output a 1D boolean mask
         super().__init__()
         self.N = N
         self.j = j
@@ -76,20 +77,40 @@ class RouteEnv(gym.Env):
         # Cached cost of solver for S_{i-1}
         self.cost_prev = None
 
+        # Store masking flag and setup unified action space
+        self.mask_action = mask_action
+        
+        # Unified action space definition: both cases use the same underlying action space
+        self.action_dim = (2 * self.max_delta + 1) ** 2  # e.g., 17x17 = 289 actions for max_delta=8
+        
+        # Create action mapping: action_idx -> (delta_o, delta_d) for both cases
+        self._action_map = {}
+        idx = 0
+        for delta_o in range(-self.max_delta, self.max_delta + 1):
+            for delta_d in range(-self.max_delta, self.max_delta + 1):
+                self._action_map[idx] = (delta_o, delta_d)
+                idx += 1
+
+        self.action_space = spaces.Discrete(self.action_dim)
+
         # Shapes for observation space
         self.L = len(self.loc_indices)   # number of spatial aggregates (H3 cells)
         self.H = 48                      # time slots (30-min)
-        # Observation = {"history_aggregate": (L,L,H,H) int tensor, "next_request": (4,) float/int tuple}
-        self.observation_space = spaces.Dict({
+        
+        # Build observation space
+        obs_spaces = {
             "history_aggregate": spaces.Box(low=0, high=np.iinfo(np.int32).max,
                                             shape=(self.L, self.L, self.H, self.H), dtype=np.int32),
             "next_request": spaces.Box(low=np.array([0, 0, 1, 1], dtype=np.float32),
                                        high=np.array([self.L-1, self.L-1, self.H, self.H], dtype=np.float32),
                                        shape=(4,), dtype=np.float32)
-        })
-
-        # Action = (delta_o_t, delta_d_t) as integer perturbations directly in [-max_delta, +max_delta]
-        self.action_space = spaces.Box(low=-self.max_delta, high=self.max_delta, shape=(2,), dtype=np.int32)
+        }
+        
+        # Add action mask to observation space if masking is enabled
+        if mask_action:
+            obs_spaces["action_mask"] = spaces.Box(low=0, high=1, shape=(self.action_dim,), dtype=np.int8)
+        
+        self.observation_space = spaces.Dict(obs_spaces)
 
     # ---------- Core Gym API ----------
 
@@ -114,11 +135,13 @@ class RouteEnv(gym.Env):
         return obs, info
 
     def step(self, action):
-        # Interpret action as integer perturbations directly; clip to bounds
-        a = np.asarray(action, dtype=np.int32)
-        a = np.clip(a, -self.max_delta, self.max_delta)
-        delta_o = int(a[0])
-        delta_d = int(a[1])
+        # Both masked and unmasked use the same discrete action space
+        action_idx = int(action)
+        if action_idx in self._action_map:
+            delta_o, delta_d = self._action_map[action_idx]
+        else:
+            # Fallback to no perturbation if invalid action
+            delta_o, delta_d = 0, 0
 
         # If no more requests, we are done
         done = self.ptr >= self.N
@@ -147,7 +170,7 @@ class RouteEnv(gym.Env):
 
         # If cost_new is infeasible (inf), set reward to -1000
         if cost_new == float('inf'):
-            reward = -1000.0
+            reward = -500.0
             obs = self._build_terminal_observation()
             info = {"i": i, "accepted": accepted, "penalty": penalty, "marginal_gain": float('inf'),
                     "cost_prev": float(self.cost_prev), "infeasible": True}
@@ -176,6 +199,7 @@ class RouteEnv(gym.Env):
         Observation dict:
           - history_aggregate: 4-D tensor aggregated from the last j fixed requests
           - next_request: the next unprocessed request (or sentinel zeros if none)
+          - action_mask: (optional) 1-D boolean mask for valid actions if mask_action=True
         """
         M = self._aggregate_from_requests(self.fixed_reqs[-self.j:]) if len(self.fixed_reqs) > 0 else np.zeros(
             (self.L, self.L, self.H, self.H), dtype=np.int32
@@ -188,7 +212,13 @@ class RouteEnv(gym.Env):
             # sentinel when done
             next_tuple = np.array([0, 0, 1, 1], dtype=np.float32)
 
-        return {"history_aggregate": M, "next_request": next_tuple}
+        obs = {"history_aggregate": M, "next_request": next_tuple}
+        
+        # Add action mask if masking is enabled
+        if self.mask_action:
+            obs["action_mask"] = self.valid_action_mask().astype(np.int8)
+            
+        return obs
 
     def _build_terminal_observation(self):
         # When done, we can still surface the final aggregate and a sentinel next_request.
@@ -197,18 +227,19 @@ class RouteEnv(gym.Env):
     def _call_user(self, next_req_orig, req_pert, delta_o, delta_d):
         """
         Call user function to get acceptance decision.
-        If a custom user_function is provided, use it; otherwise fall back to random acceptance.
+        Uses the environment's dedicated RNG to ensure user responses are truly random.
         """
-        # If a custom user_function was passed in, use it (supports richer logic)
         try:
-            if self.user_function is not None and self.user_function is not user.dummy_user:
-                return bool(self.user_function(next_req_orig, req_pert, delta_o, delta_d))
+            if self.user_function is not None:
+                # Call the user function with the environment's random generator
+                # This ensures user responses are random even when requests are seeded
+                return bool(self.user_function(self._user_rng))
         except Exception:
-            # If the custom function errors, fall back to random behavior
+            # If the user function errors, fall back to random behavior
             pass
 
-        # Default random user
-        acceptance_rate = 0.5  # 50% acceptance
+        # Fallback: Default 50% acceptance using dedicated RNG
+        acceptance_rate = 0.5
         return bool(self._user_rng.random() <= acceptance_rate)
 
     def _perturb_request(self, req, delta_o, delta_d):
@@ -216,11 +247,9 @@ class RouteEnv(gym.Env):
         Returns a new request dict with modulated time windows, clamped and feasible.
         """
         new_req = deepcopy(req)
-        new_req['o_t_index'] = int(np.clip(new_req['o_t_index'] + delta_o, 1, self.H))
-        new_req['d_t_index'] = int(np.clip(new_req['d_t_index'] + delta_d, 1, self.H))
-        # Enforce pickup time not after dropoff time
-        if new_req['d_t_index'] < new_req['o_t_index']:
-            new_req['d_t_index'] = new_req['o_t_index']
+        new_req['o_t_index'] = new_req['o_t_index'] + delta_o
+        new_req['d_t_index'] = new_req['d_t_index'] + delta_d
+
         return new_req
 
     def _aggregate_from_requests(self, reqs_subset):
@@ -306,9 +335,46 @@ class RouteEnv(gym.Env):
             np.random.seed(seed)
         # Keep user responses random (don't seed self._user_rng)
         return [seed]
+    
+    def valid_action_mask(self):
+        """
+        Generate action mask for the current state.
+        Only works when mask_action=True (discrete action space).
+        
+        Returns:
+            A 1D boolean mask for the action space where True means the action is valid.
+        """
+        if not self.mask_action:
+            raise ValueError("Action masking only available when mask_action=True")
+            
+        if self.ptr >= self.N:
+            # No more requests, all actions invalid (episode should be done)
+            return np.zeros(self.action_dim, dtype=bool)
+            
+        # Get current request
+        current_req = self.original_reqs[self.ptr]
+        o_t = current_req['o_t_index']
+        d_t = current_req['d_t_index']
+        
+        mask = np.zeros(self.action_dim, dtype=bool)
+        
+        for action_idx in range(self.action_dim):
+            delta_o, delta_d = self._action_map[action_idx]
+            
+            # Check if the perturbed times are valid
+            new_o_t = o_t + delta_o
+            new_d_t = d_t + delta_d
+            
+            # Valid if:
+            # 1. Both times are within [1, H] (as per your clipping logic)
+            # 2. Pickup time <= dropoff time after perturbation (enforced in _perturb_request)
+            if (1 <= new_o_t <= self.H and 1 <= new_d_t <= self.H and new_o_t < new_d_t):
+                mask[action_idx] = True
+                
+        return mask
 
 if __name__ == "__main__":
-    env = RouteEnv(user_function=user.dummy_user)
+    env = RouteEnv(user_function=user.dummy_user, mask_action=True)
     obs, info = env.reset()
     #print(obs)
     action = env.action_space.sample()
